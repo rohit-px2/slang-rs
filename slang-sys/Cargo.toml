@@ -12,6 +12,13 @@ serde = { version = "1", features = ["derive"], optional = true }
 
 [build-dependencies]
 bindgen = "0.72.0"
+# The following are only used when the `download-slang` feature is enabled
+# and no system Slang installation was found via the environment.
+ureq = { version = "3", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+sha2 = { version = "0.10", optional = true }
 
 [features]
+default = ["download-slang"]
+download-slang = ["dep:ureq", "dep:zip", "dep:sha2"]
 serde = ["dep:serde"]

@@ -53,11 +53,53 @@ let shader_bytecode = linked_program.entry_point_code(0, 0).unwrap();
 
 Add `shader-slang` to the `[dependencies]` section of your `Cargo.toml`.
 
-Point this library to a Slang installation. An easy way is by installing the [LunarG Vulkan SDK](https://vulkan.lunarg.com) which comes bundled with the Slang compiler. During installation `VULKAN_SDK` is added to the `PATH` and automatically picked up by this library.
+By default no Slang installation is required: if no system Slang is found,
+the build script downloads a pinned official Slang release (currently
+`2026.17`) for your target, verifies its SHA-256 checksum, and builds against
+it. The download is cached in Cargo's `OUT_DIR`, so it normally happens once
+(`cargo clean` removes it and triggers a re-download). Supported targets are
+Windows (MSVC), Linux (glibc) and macOS, on x86-64 and ARM64.
 
-Alternatively, download Slang from their [releases page](https://github.com/shader-slang/slang/releases) and manually set the `SLANG_DIR` environment variable to the path of your Slang directory. Copy `slang.dll` to your executable's directory. To compile to DXIL bytecode, also copy `dxil.dll` and `dxcompiler.dll` from the [Microsoft DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler/releases) to your executable's directory.
+To use a system Slang instead, set one of the following before building
+(first match wins):
 
-To specify the `include` and `lib` directories separately, set the `SLANG_INCLUDE_DIR` and `SLANG_LIB_DIR` environment variables.
+| Environment variable(s) | Meaning |
+| --- | --- |
+| `SLANG_INCLUDE_DIR` + `SLANG_LIB_DIR` | Include and library directories separately (`SLANG_BIN_DIR` optionally points at the Windows DLLs) |
+| `SLANG_DIR` | Slang installation root (expects `include/`, `lib/` and, on Windows, `bin/` underneath) |
+| `VULKAN_SDK` | LunarG Vulkan SDK, which bundles the Slang compiler |
+
+To opt out of the automatic download (offline, Nix, Bazel or vendored
+builds), disable the `download-slang` cargo feature or set
+`SLANG_NO_DOWNLOAD=1`:
+
+```toml
+[dependencies]
+shader-slang = { version = "...", default-features = false }
+```
+
+An easy manual setup is installing the [LunarG Vulkan SDK](https://vulkan.lunarg.com),
+which adds `VULKAN_SDK` to the environment automatically.
+
+Alternatively, download Slang from their [releases page](https://github.com/shader-slang/slang/releases)
+and set `SLANG_DIR` to the extracted directory.
+
+### Runtime deployment
+
+Automatic provisioning makes *build-time* Slang compilation (e.g. `.slang`
+to SPIR-V in a build script) self-contained. Applications that use Slang
+*at runtime* must still ship the Slang shared library with their executable:
+on Windows copy `slang-compiler.dll` (plus `slang-rt.dll`/`slang-glslang.dll`
+if used) next to the executable; on Linux/macOS make sure
+`libslang-compiler.so`/`libslang-compiler.dylib` is on the loader search path.
+To compile to DXIL bytecode, also copy `dxil.dll` and `dxcompiler.dll` from
+the [Microsoft DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler/releases)
+to your executable's directory.
+
+Since Slang v2025.21 the compiler library is named `slang-compiler`
+(`slang-compiler.dll`, `libslang-compiler.so/.dylib`); this crate links
+against that name and only falls back to the legacy `slang` name for older
+system installations.
 
 ## Credits
 
