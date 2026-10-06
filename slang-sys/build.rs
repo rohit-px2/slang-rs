@@ -52,6 +52,9 @@ fn main() {
 	// alongside their executable; see the crate README.
 	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
 		copy_dlls_to_out_dir(&install.bin_dir, &out_dir);
+		// Cargo adds native search paths inside OUT_DIR to the runtime search
+		// path when launching dependent build scripts and other host-side users.
+		println!("cargo:rustc-link-search=native={}", out_dir.display());
 	}
 
 	let header = install.include_dir.join("slang.h");
