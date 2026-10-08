@@ -350,12 +350,28 @@ fn stage_linux_libraries(lib_dir: &Path, out_dir: &Path) -> Result<(), String> {
 			for entry in fs::read_dir(out_dir)? {
 				let entry = entry?;
 				if is_linux_library(&entry.path()) {
-					// Rename a private temporary link atomically so repeated
-					// builds never truncate an already loaded shared library.
-					let temporary = out_dir.join(".slang-runtime-link");
-					let _ = fs::remove_file(&temporary);
-					std::os::unix::fs::symlink(entry.path(), &temporary)?;
-					fs::rename(&temporary, deps.join(entry.file_name()))?;
+					let destination = deps.join(entry.file_name());
+					// Keep an already-correct link. Avoid renaming symlinks
+					// across directories: ntfs3 can leave duplicate directory
+					// entries and report ENOENT on a later rename.
+					if fs::read_link(&destination).is_ok_and(|target| target == entry.path()) {
+						continue;
+					}
+					match fs::remove_file(&destination) {
+						Ok(()) => {}
+						Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+						Err(err) => return Err(err),
+					}
+					std::os::unix::fs::symlink(entry.path(), &destination).map_err(|err| {
+						std::io::Error::new(
+							err.kind(),
+							format!(
+								"publishing `{}` -> `{}`: {err}",
+								destination.display(),
+								entry.path().display()
+							),
+						)
+					})?;
 				}
 			}
 		}

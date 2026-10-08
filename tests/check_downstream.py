@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +24,45 @@ def cargo(target, *args, env=ENV):
     )
 
 
+def check_repository_filesystem(build_script, install_root):
+    # Cargo dependencies are compiled in /tmp for speed, but exercise staging
+    # on the repository filesystem too (which may be ntfs3, unlike /tmp).
+    parent = ROOT / "target"
+    parent.mkdir(exist_ok=True)
+    cfg = subprocess.check_output(["rustc", "--print", "cfg"], env=ENV, text=True)
+    target_env = {
+        "CARGO_CFG_" + key.upper(): value.strip('"')
+        for line in cfg.splitlines() if "=" in line
+        for key, value in [line.split("=", 1)]
+    }
+    with tempfile.TemporaryDirectory(prefix="slang-staging-", dir=parent) as temporary:
+        profile = Path(temporary) / "debug"
+        out = profile / "build/shader-slang-sys-fixture/out"
+        root = out / install_root.name
+        (root / "lib").mkdir(parents=True)
+        (root / "include").symlink_to(install_root / "include", target_is_directory=True)
+        # Staging itself does not load these files; genuine compiler execution
+        # is tested by the downstream build script above.
+        (root / "lib/libslang-compiler.so.0.fixture").write_bytes(b"compiler")
+        (root / "lib/libslang-compiler.so").symlink_to("libslang-compiler.so.0.fixture")
+        (root / "lib/libslang-backend.so").write_bytes(b"backend")
+        expected = {path.name for path in (root / "lib").iterdir()}
+        for _ in range(3):
+            subprocess.run([str(build_script)], cwd=ROOT / "slang-sys",
+                           env={**ENV, **target_env, "OUT_DIR": str(out)}, check=True,
+                           stdout=subprocess.DEVNULL, timeout=30)
+            entries = list((profile / "deps").iterdir())
+            assert len(entries) == len(expected), entries
+            assert {path.name for path in entries} == expected
+            for path in entries:
+                assert path.readlink() == out / path.name
+                assert path.read_bytes() == (root / "lib" / path.name).read_bytes()
+
+
+if len(sys.argv) == 4 and sys.argv[1] == "--staging-only":
+    check_repository_filesystem(Path(sys.argv[2]), Path(sys.argv[3]))
+    sys.exit(0)
+
 with tempfile.TemporaryDirectory(prefix="slang-downstream-") as temporary:
     target = Path(temporary) / "target"
     cargo(target, "check")
@@ -37,6 +77,8 @@ with tempfile.TemporaryDirectory(prefix="slang-downstream-") as temporary:
     assert (out / "libslang-compiler.so").is_file()
     assert any(out.glob("libslang-compiler.so.*"))
     assert all((out / path.name).is_file() for path in (install_root / "lib").glob("*.so*"))
+    build_script = next((target / "debug/build").glob("shader-slang-sys-*/build-script-build"))
+    check_repository_filesystem(build_script, install_root)
     (out / "libslang-obsolete.so.0").write_text("stale version")
     (target / "debug/deps/libslang-obsolete.so.0").symlink_to(out / "libslang-obsolete.so.0")
     cargo(target, "check", env={**ENV, "SLANG_NO_DOWNLOAD": "0"})
