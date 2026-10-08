@@ -33,6 +33,14 @@ fn main() {
 	let out_dir =
 		PathBuf::from(env::var_os("OUT_DIR").expect("Couldn't determine output directory."));
 
+	#[cfg(all(feature = "download-slang", target_os = "linux"))]
+	if install.lib_dir != out_dir && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+		// Switching an existing build from automatic to explicit discovery
+		// must not leave our runtime aliases ahead of the user's loader path.
+		remove_staged_linux_libraries(&out_dir)
+			.unwrap_or_else(|err| panic!("Failed to remove staged Slang libraries: {err}"));
+	}
+
 	// Since Slang v2025.21 the primary compiler library is `slang-compiler`
 	// (`slang-compiler.dll`, `libslang-compiler.so/.dylib`). The old `slang`
 	// names only remain as compatibility aliases scheduled for removal at the
@@ -271,11 +279,125 @@ fn download_slang_prebuilt() -> Result<SlangInstall, String> {
 		let bin = root.join("bin");
 		if bin.is_dir() { bin } else { lib_dir.clone() }
 	};
+	// Keep native link inputs and the complete Linux runtime in OUT_DIR.
+	let lib_dir = if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+		stage_linux_libraries(&lib_dir, &out_dir)?;
+		out_dir
+	} else {
+		lib_dir
+	};
 	Ok(SlangInstall {
 		include_dir: root.join("include"),
 		lib_dir,
 		bin_dir,
 	})
+}
+
+/// Stage the complete Linux runtime, including optional compiler backends.
+#[cfg(feature = "download-slang")]
+fn stage_linux_libraries(lib_dir: &Path, out_dir: &Path) -> Result<(), String> {
+	let stage = || -> std::io::Result<()> {
+		let libraries = fs::read_dir(lib_dir)?
+			.collect::<Result<Vec<_>, _>>()?
+			.into_iter()
+			.filter(|entry| is_linux_library(&entry.path()))
+			.collect::<Vec<_>>();
+		// OUT_DIR belongs to this build script. Remove obsolete names left by
+		// another version, without touching bindings or downloads.
+		for entry in fs::read_dir(out_dir)? {
+			let entry = entry?;
+			if is_linux_library(&entry.path())
+				&& !libraries
+					.iter()
+					.any(|library| library.file_name() == entry.file_name())
+			{
+				fs::remove_file(entry.path())?;
+			}
+		}
+		for entry in libraries {
+			// Materialize aliases so both linker and SONAME names remain valid
+			// even for links that originally point outside the flat directory.
+			// Replace atomically instead of truncating an already loaded file.
+			let temporary = out_dir.join(".slang-runtime-library");
+			fs::copy(entry.path(), &temporary)?;
+			fs::rename(&temporary, out_dir.join(entry.file_name()))?;
+		}
+		#[cfg(target_os = "linux")]
+		{
+			// `cargo check` can omit native search paths when executing build
+			// scripts (unlike `cargo build`). Its host `deps` directory is
+			// always on LD_LIBRARY_PATH. Publish links there as well; keep the
+			// actual libraries in OUT_DIR. Derive the profile directory from
+			// Cargo's layout, never from a package hash or target name.
+			let profile_dir = out_dir
+				.parent()
+				.and_then(Path::parent)
+				.filter(|path| path.file_name().is_some_and(|name| name == "build"))
+				.and_then(Path::parent)
+				.ok_or_else(|| std::io::Error::other("Unexpected Cargo OUT_DIR layout"))?;
+			let deps = profile_dir.join("deps");
+			fs::create_dir_all(&deps)?;
+			for entry in fs::read_dir(&deps)? {
+				let entry = entry?;
+				if is_linux_library(&entry.path())
+					&& fs::read_link(entry.path())
+						.is_ok_and(|target| target.parent() == Some(out_dir))
+					&& !out_dir.join(entry.file_name()).exists()
+				{
+					fs::remove_file(entry.path())?;
+				}
+			}
+			for entry in fs::read_dir(out_dir)? {
+				let entry = entry?;
+				if is_linux_library(&entry.path()) {
+					// Rename a private temporary link atomically so repeated
+					// builds never truncate an already loaded shared library.
+					let temporary = out_dir.join(".slang-runtime-link");
+					let _ = fs::remove_file(&temporary);
+					std::os::unix::fs::symlink(entry.path(), &temporary)?;
+					fs::rename(&temporary, deps.join(entry.file_name()))?;
+				}
+			}
+		}
+		Ok(())
+	};
+	stage().map_err(|err| format!("Failed to stage Slang runtime libraries: {err}"))
+}
+
+#[cfg(all(feature = "download-slang", target_os = "linux"))]
+fn remove_staged_linux_libraries(out_dir: &Path) -> std::io::Result<()> {
+	let Some(profile_dir) = out_dir
+		.parent()
+		.and_then(Path::parent)
+		.and_then(Path::parent)
+	else {
+		return Ok(());
+	};
+	let deps = profile_dir.join("deps");
+	if deps.is_dir() {
+		for entry in fs::read_dir(deps)? {
+			let entry = entry?;
+			if is_linux_library(&entry.path())
+				&& fs::read_link(entry.path()).is_ok_and(|target| target.parent() == Some(out_dir))
+			{
+				fs::remove_file(entry.path())?;
+			}
+		}
+	}
+	for entry in fs::read_dir(out_dir)? {
+		let entry = entry?;
+		if is_linux_library(&entry.path()) {
+			fs::remove_file(entry.path())?;
+		}
+	}
+	Ok(())
+}
+
+#[cfg(feature = "download-slang")]
+fn is_linux_library(path: &Path) -> bool {
+	path.file_name()
+		.and_then(|name| name.to_str())
+		.is_some_and(|name| name.ends_with(".so") || name.contains(".so."))
 }
 
 #[cfg(not(feature = "download-slang"))]
